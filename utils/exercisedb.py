@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 api_base_url = "http://192.168.3.21:5002"
-CACHE_FILE = Path(__file__).parent / "exercise_cache.json"
+CACHE_FILE = Path(__file__).parent.parent / "cache" / "exercise_cache.json"
 
 class ExerciseDBSearch:
     def __init__(self):

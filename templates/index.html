@@ -3,9 +3,232 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
+    <title>TrueSight - Exercise Detection</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        .form-group {
+            margin-bottom: 25px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: bold;
+        }
+        select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: border-color 0.3s;
+        }
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .loading {
+            text-align: center;
+            color: #667eea;
+            font-weight: bold;
+        }
+        .error {
+            color: #e74c3c;
+            padding: 10px;
+            background: #fadbd8;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            display: none;
+        }
+        .success {
+            color: #27ae60;
+            padding: 10px;
+            background: #d5f4e6;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            display: none;
+        }
+        .exercise-info {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 5px;
+            display: none;
+        }
+        .exercise-info h3 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .exercise-info p {
+            color: #666;
+            margin: 5px 0;
+        }
+    </style>
 </head>
 <body>
-    <h1>TrueSight</h1>
+    <div class="container">
+        <h1>TrueSight</h1>
+        <div class="error" id="errorMsg"></div>
+        <div class="success" id="successMsg"></div>
+        
+        <form id="exerciseForm">
+            <div class="form-group">
+                <label for="exercises">Select Exercise:</label>
+                <select id="exercises" required>
+                    <option value="">Loading exercises...</option>
+                </select>
+            </div>
+
+            <div class="exercise-info" id="exerciseInfo">
+                <h3 id="exerciseName"></h3>
+                <p><strong>Target Muscles:</strong> <span id="targetMuscles"></span></p>
+            </div>
+
+            <button type="submit" id="submitBtn" disabled>Analyze Exercise</button>
+        </form>
+    </div>
+
+    <script>
+        const API_BASE = "http://localhost:5002"// http://192.168.3.21:5002";
+        const TRUESIGHT_API = window.location.origin;
+        
+        // Load exercises from ExerciseDB API
+        async function loadExercises() {
+            try {
+                const response = await fetch(`${API_BASE}/v1/exercises`);
+                if (!response.ok) throw new Error("Failed to fetch exercises");
+                
+                const exercises = await response.json();
+                const select = document.getElementById("exercises");
+                select.innerHTML = '<option value="">Select an exercise...</option>';
+                
+                exercises.forEach(exercise => {
+                    const option = document.createElement("option");
+                    option.value = JSON.stringify(exercise);
+                    option.textContent = exercise.name;
+                    select.appendChild(option);
+                });
+                
+                document.getElementById("submitBtn").disabled = false;
+            } catch (error) {
+                showError("Failed to load exercises: " + error.message);
+                console.error(error);
+            }
+        }
+
+        // Show exercise details
+        document.getElementById("exercises").addEventListener("change", function() {
+            if (this.value) {
+                const exercise = JSON.parse(this.value);
+                document.getElementById("exerciseName").textContent = exercise.name;
+                document.getElementById("targetMuscles").textContent = 
+                    (exercise.primaryMuscles || []).join(", ") || "N/A";
+                document.getElementById("exerciseInfo").style.display = "block";
+            } else {
+                document.getElementById("exerciseInfo").style.display = "none";
+            }
+        });
+
+        // Submit to TrueSight API
+        document.getElementById("exerciseForm").addEventListener("submit", async function(e) {
+            e.preventDefault();
+            
+            const exercise = JSON.parse(document.getElementById("exercises").value);
+            const submitBtn = document.getElementById("submitBtn");
+            submitBtn.disabled = true;
+            submitBtn.textContent = "Analyzing...";
+
+            try {
+                const response = await fetch(`${TRUESIGHT_API}/api/analyze`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        exercise_name: exercise.name,
+                        exercise_id: exercise.id,
+                        images: exercise.images || []
+                    })
+                });
+
+                const result = await response.json();
+                
+                if (response.ok) {
+                    showSuccess("Analysis complete! " + JSON.stringify(result, null, 2));
+                } else {
+                    showError(result.error || "Analysis failed");
+                }
+            } catch (error) {
+                showError("Failed to submit: " + error.message);
+                console.error(error);
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = "Analyze Exercise";
+            }
+        });
+
+        function showError(msg) {
+            const errorDiv = document.getElementById("errorMsg");
+            errorDiv.textContent = msg;
+            errorDiv.style.display = "block";
+            setTimeout(() => errorDiv.style.display = "none", 5000);
+        }
+
+        function showSuccess(msg) {
+            const successDiv = document.getElementById("successMsg");
+            successDiv.textContent = msg;
+            successDiv.style.display = "block";
+            setTimeout(() => successDiv.style.display = "none", 5000);
+        }
+
+        // Load exercises on page load
+        loadExercises();
+    </script>
 </body>
 </html>
