@@ -1,8 +1,10 @@
-/input/*
-/output/*
+/static/uploads/*
+/static/output/*
+
 __pycache__/
 /models/*
 /runs/*
 
 *cache*
 *.log
+.DS_Store

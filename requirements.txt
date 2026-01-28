@@ -1,2 +1,5 @@
 ultralytics
 flask
+opencv-python
+mediapipe
+numpy

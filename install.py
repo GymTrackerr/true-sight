@@ -5,7 +5,7 @@ from utils.exercisedb import ExerciseDBSearch
 api_base_url = "http://192.168.3.21:5002"
 
 # load model
-model = YOLO("yolo11m-pose.pt")
+model = YOLO("yolo26s-pose.pt")
 
 # Predict with the model
 # results = model.track(source="./input/test2.mov", show=True, save=True)

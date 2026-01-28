@@ -73,6 +73,36 @@
             opacity: 0.5;
             cursor: not-allowed;
         }
+        .file-input-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+            width: 100%;
+        }
+        .file-input-wrapper input[type=file] {
+            position: absolute;
+            left: -9999px;
+        }
+        .file-input-label {
+            display: block;
+            padding: 12px;
+            background: #f0f0f0;
+            border: 2px dashed #667eea;
+            border-radius: 5px;
+            text-align: center;
+            cursor: pointer;
+            transition: background 0.3s;
+            color: #667eea;
+            font-weight: bold;
+        }
+        .file-input-label:hover {
+            background: #e8e8ff;
+        }
+        .file-input-label.has-file {
+            background: #d5f4e6;
+            border-color: #27ae60;
+            color: #27ae60;
+        }
         .loading {
             text-align: center;
             color: #667eea;
@@ -93,6 +123,17 @@
             border-radius: 5px;
             margin-bottom: 15px;
             display: none;
+        }
+        .video-container {
+            margin-top: 20px;
+            text-align: center;
+            display: none;
+        }
+        .video-container video {
+            max-width: 100%;
+            height: auto;
+            border-radius: 5px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }
         .exercise-info {
             margin-top: 20px;
@@ -116,6 +157,10 @@
         <h1>TrueSight</h1>
         <div class="error" id="errorMsg"></div>
         <div class="success" id="successMsg"></div>
+        <div class="video-container" id="videoContainer">
+            <h3>Analyzed Video:</h3>
+            <video id="outputVideo" controls></video>
+        </div>
         
         <form id="exerciseForm">
             <div class="form-group">
@@ -130,7 +175,24 @@
                 <p><strong>Target Muscles:</strong> <span id="targetMuscles"></span></p>
             </div>
 
+            <div class="form-group">
+                <label>Upload Video/Image:</label>
+                <div class="file-input-wrapper">
+                    <input type="file" id="fileInput" accept="image/*,video/*">
+                    <label for="fileInput" class="file-input-label" id="fileLabel">
+                        📁 Click to select or drag & drop
+                    </label>
+                </div>
+                <small style="color: #888; display: block; margin-top: 5px;">Supported: Images (JPG, PNG) and Videos (MP4, MOV)</small>
+            </div>
+
+            <div class="form-group" style="display: flex; align-items: center; margin-bottom: 20px;">
+                <input type="checkbox" id="drawSkeletonCheckbox" style="width: auto; margin-right: 10px; cursor: pointer;">
+                <label for="drawSkeletonCheckbox" style="margin: 0; margin-bottom: 0; font-weight: normal;">Draw skeleton on video</label>
+            </div>
+
             <button type="submit" id="submitBtn" disabled>Analyze Exercise</button>
+            <button type="button" id="uploadBtn" style="background: #27ae60; margin-top: 10px;" disabled>Analyze Upload</button>
         </form>
     </div>
 
@@ -170,13 +232,54 @@
                 document.getElementById("targetMuscles").textContent = 
                     (exercise.primaryMuscles || []).join(", ") || "N/A";
                 document.getElementById("exerciseInfo").style.display = "block";
+                document.getElementById("submitBtn").disabled = false;
+                // Enable upload button if file is selected
+                if (document.getElementById("fileInput").files.length > 0) {
+                    document.getElementById("uploadBtn").disabled = false;
+                }
             } else {
                 document.getElementById("exerciseInfo").style.display = "none";
+                document.getElementById("submitBtn").disabled = true;
+                document.getElementById("uploadBtn").disabled = true;
             }
         });
 
-        // Submit to TrueSight API
-        document.getElementById("exerciseForm").addEventListener("submit", async function(e) {
+        // File input handling
+        const fileInput = document.getElementById("fileInput");
+        const fileLabel = document.getElementById("fileLabel");
+
+        fileInput.addEventListener("change", function() {
+            if (this.files.length > 0) {
+                fileLabel.textContent = `✓ ${this.files[0].name}`;
+                fileLabel.classList.add("has-file");
+                if (document.getElementById("exercises").value) {
+                    document.getElementById("uploadBtn").disabled = false;
+                }
+            } else {
+                fileLabel.textContent = "📁 Click to select or drag & drop";
+                fileLabel.classList.remove("has-file");
+                document.getElementById("uploadBtn").disabled = true;
+            }
+        });
+
+        // Drag and drop
+        fileLabel.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            fileLabel.style.background = "#e8e8ff";
+        });
+        fileLabel.addEventListener("dragleave", () => {
+            fileLabel.style.background = "";
+        });
+        fileLabel.addEventListener("drop", (e) => {
+            e.preventDefault();
+            if (e.dataTransfer.files.length > 0) {
+                fileInput.files = e.dataTransfer.files;
+                fileInput.dispatchEvent(new Event("change"));
+            }
+        });
+
+        // Submit exercise analysis (API dropdown)
+        document.getElementById("submitBtn").addEventListener("click", async function(e) {
             e.preventDefault();
             
             const exercise = JSON.parse(document.getElementById("exercises").value);
@@ -212,6 +315,88 @@
                 submitBtn.textContent = "Analyze Exercise";
             }
         });
+
+        // Submit file upload
+        document.getElementById("uploadBtn").addEventListener("click", async function() {
+            const exercise = JSON.parse(document.getElementById("exercises").value);
+            const file = document.getElementById("fileInput").files[0];
+            
+            if (!file || !exercise) {
+                showError("Please select both exercise and file");
+                return;
+            }
+
+            const uploadBtn = document.getElementById("uploadBtn");
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = "Processing...";
+
+            try {
+                const formData = new FormData();
+                formData.append("exercise", exercise.name);
+                formData.append("video", file);
+                formData.append("webcamstream", "false");
+                const drawSkeleton = document.getElementById("drawSkeletonCheckbox").checked ? "true" : "false";
+                formData.append("drawSkeleton", drawSkeleton);
+
+                const response = await fetch(`${TRUESIGHT_API}/upload`, {
+                    method: "POST",
+                    body: formData
+                });
+
+                const result = await response.json();
+                
+                if (response.ok) {
+                    showSuccess("Video uploaded! Processing started...");
+                    // Poll for completion every 10 seconds (request_id is already {UUID}.mp4)
+                    pollForCompletion(result.request_id);
+                } else {
+                    showError(result.message || "Upload failed");
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = "Analyze Upload";
+                }
+            } catch (error) {
+                showError("Failed to upload: " + error.message);
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = "Analyze Upload";
+            }
+        });
+
+        function pollForCompletion(requestId) {
+            const uploadBtn = document.getElementById("uploadBtn");
+            let isComplete = false;
+            
+            const pollInterval = setInterval(async () => {
+                // Don't continue polling if already complete
+                if (isComplete) {
+                    clearInterval(pollInterval);
+                    return;
+                }
+                
+                try {
+                    const response = await fetch(`${TRUESIGHT_API}/api/status/${requestId}`);
+                    const result = await response.json();
+                    
+                    if (result.status === "complete") {
+                        isComplete = true;
+                        clearInterval(pollInterval);
+                        showSuccess("Video processing complete!");
+                        
+                        // Display the video
+                        const videoContainer = document.getElementById("videoContainer");
+                        const videoElement = document.getElementById("outputVideo");
+                        videoElement.src = result.output_path;
+                        videoContainer.style.display = "block";
+                        
+                        uploadBtn.disabled = false;
+                        uploadBtn.textContent = "Analyze Upload";
+                        
+                        console.log("Video processing completed and polling stopped");
+                    }
+                } catch (error) {
+                    console.error("Error polling status:", error);
+                }
+            }, 10000); // Poll every 10 seconds
+        }
 
         function showError(msg) {
             const errorDiv = document.getElementById("errorMsg");

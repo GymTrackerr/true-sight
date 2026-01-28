@@ -30,11 +30,19 @@ class ConnectedJoints(Enum):
 class frame_save:
     def __init__(self, result):
         self.result = result
+    
+    def has_detections(self):
+        """Check if this frame has any keypoint detections"""
+        return (self.result.keypoints is not None and 
+                self.result.keypoints.xy is not None and 
+                len(self.result.keypoints.xy) > 0)
 
     def get_joint(self, joint:Joints):
         # print(joint)
         # if (joint < 0 or joint >= len(self.result['keypoints'])):
         #     raise ValueError("Invalid joint index")
+        if not self.has_detections():
+            return None
         return self.result.keypoints.xy[0][joint.value]
     
     def get_connected_joints(self, connected:ConnectedJoints):
@@ -47,19 +55,26 @@ class frame_save:
     def find_changing_joints(self, frame2):
         """Array of [name, index, difference, angle1, angle2] for connecting joints"""
         changes = []
+        
+        # Skip if either frame has no detections
+        if not self.has_detections() or not frame2.has_detections():
+            return changes
 
         for i in range(len(ConnectedJoints)):
             connected = list(ConnectedJoints)[i]
             # Get angle differences between frames
             angle1 = self.get_angle_diff(connected.value[0], connected.value[1], connected.value[2])
             angle2 = frame2.get_angle_diff(connected.value[0], connected.value[1], connected.value[2])
-            DIF = abs(angle1 - angle2)
-            changes.append([connected.name, i, DIF, angle1, angle2])
+            
+            if angle1 is not None and angle2 is not None:
+                DIF = abs(angle1 - angle2)
+                changes.append([connected.name, i, DIF, angle1, angle2])
 
         # changes.sort()
         # sort by changes[2]
         changes.sort(key=lambda x: x[2], reverse=True)
-        print(changes)
+        if changes:
+            print(changes)
         return changes
 
     def find_changing_loc(self, frame2):
@@ -87,6 +102,10 @@ class frame_save:
         loc_2 = self.get_joint(joint2)
         loc_3 = self.get_joint(joint3)
         
+        # Return None if any joint is missing
+        if loc_1 is None or loc_2 is None or loc_3 is None:
+            return None
+        
         # Vectors from joint2 to joint1 and joint2 to joint3
         v1 = [loc_1[0] - loc_2[0], loc_1[1] - loc_2[1]]
         v2 = [loc_3[0] - loc_2[0], loc_3[1] - loc_2[1]]
@@ -97,7 +116,7 @@ class frame_save:
         mag2 = (v2[0]**2 + v2[1]**2)**0.5
         
         if mag1 == 0 or mag2 == 0:
-            return 0
+            return None
         
         cos_angle = dot / (mag1 * mag2)
         angle = degrees(atan2((v1[0]*v2[1] - v1[1]*v2[0]), dot))
