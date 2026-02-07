@@ -27,6 +27,8 @@ class LiveMetrics:
 
     view_badness: Optional[float]            # 0..1 higher = more foreshortened/rotated
 
+    rep_progress: Optional[float]            # 0..100 percentage through current rep
+
     reps: int
     rep_event: Optional[dict]   # populated only when a rep is counted
     rep_rom: Optional[float]
@@ -45,6 +47,7 @@ class LiveMetrics:
             "smoothness": self.smoothness,
             "torso_drift": self.torso_drift,
             "view_badness": self.view_badness,
+            "rep_progress": self.rep_progress,
             "reps": self.reps,
             "rep_event": self.rep_event,
             "rep_rom": self.rep_rom,
@@ -170,6 +173,9 @@ class LiveWindowAnalyzer:
         view_badness = self._view_badness()
         rep_info = self._update_rep_counter(primary_key=primary[0] if primary else None, angles=angles, rom=rom, view_badness=view_badness)
         
+        # Calculate rep progress
+        rep_progress = self._calculate_rep_progress(angles)
+        
         # Track frames for rep scoring
         self._rep_frames.append({k: float(v) for k, v in angles.items()})
         
@@ -198,6 +204,7 @@ class LiveWindowAnalyzer:
             smoothness=smooth,
             torso_drift=drift,
             view_badness=view_badness,
+            rep_progress=rep_progress,
             reps=self.rep_count,
             rep_event=rep_info.get("event"),
             rep_rom=rep_info.get("rom"),
@@ -549,6 +556,51 @@ class LiveWindowAnalyzer:
 
         return {"key": self._rep_signal_key, "rom": (self._max_val - self._min_val) if (self._max_val is not None and self._min_val is not None) else None,
                 "event": event}
+
+    def _calculate_rep_progress(self, angles: Dict[str, float]) -> Optional[float]:
+        """
+        Calculate percentage progress through current rep based on template min/max.
+        Returns 0-100 percentage.
+        """
+        if not self.template or not angles:
+            return None
+        
+        try:
+            joints_info = self.template.joints
+            if not joints_info:
+                return None
+            
+            progress_scores = []
+            
+            for joint_name, joint_config in joints_info.items():
+                if joint_name in angles:
+                    current_angle = angles[joint_name]
+                    min_angle = float(joint_config.min)
+                    max_angle = float(joint_config.max)
+                    weight = float(joint_config.weight)
+                    
+                    # Calculate progress as percentage within the range
+                    if current_angle < min_angle:
+                        progress = 0
+                    elif current_angle > max_angle:
+                        progress = 100
+                    else:
+                        range_size = max_angle - min_angle
+                        current_progress = current_angle - min_angle
+                        progress = (current_progress / range_size) * 100 if range_size > 0 else 0
+                    
+                    # Weight by joint importance
+                    progress_scores.append((progress, weight))
+            
+            if progress_scores:
+                # Calculate weighted average
+                total_weighted = sum(p * w for p, w in progress_scores)
+                total_weight = sum(w for _, w in progress_scores)
+                return total_weighted / total_weight if total_weight > 0 else None
+        except Exception as e:
+            print(f"Error calculating rep progress: {e}")
+        
+        return None
 
 
 def score_rep_against_template(

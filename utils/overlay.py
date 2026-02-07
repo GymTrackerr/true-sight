@@ -59,8 +59,11 @@ def draw_pose_and_metrics(frame_bgr, frame_obj, metrics):
         smooth = metrics.get("smoothness")
         drift = metrics.get("torso_drift")
         view = metrics.get("view_badness")
+        rep_progress = metrics.get("rep_progress")
 
         put(f"reps: {reps if reps is not None else '-'}")
+        if rep_progress is not None:
+            put(f"rep progress: {rep_progress:.0f}%")
         if primary:
             put(f"primary: {primary[0]} ROM={primary[1]:.1f}")
         if smooth is not None:
