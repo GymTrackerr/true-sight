@@ -93,6 +93,13 @@ class LiveWindowAnalyzer:
         self.rep_count = 0
         self._active_key = None          # which angle we are counting reps from
         self._rep_signal_key = None      # locked signal for rep counting (left/right averaged)
+        # Label -> (left_key, right_key) for averaged signals
+        self._label_to_keys = {
+            "arm": ("LEFT_ARM", "RIGHT_ARM"),
+            "leg": ("LEFT_LEG", "RIGHT_LEG"),
+            "hip": ("LEFT_HIP", "RIGHT_HIP"),
+            "shoulder": ("LEFT_SHOULDER", "RIGHT_SHOULDER"),
+        }
         self._rep_signal_lock_frames = 0  # frames remaining to keep signal locked
         self._rep_signal_lock_duration = max(150, int(5.0 * self.fps))  # lock for 5 seconds
         self._ema = None                 # smoothed angle value
@@ -365,29 +372,56 @@ class LiveWindowAnalyzer:
         return max(pair_roms, key=pair_roms.get)
 
     def _get_rep_signal_averaged(self, joint_label: str, angles: Dict[str, float]) -> Optional[float]:
-        """
-        Get averaged left/right signal for a joint (e.g., "leg" -> (LEFT_LEG + RIGHT_LEG)/2).
-        Reduces jitter from single joint tracking.
-        """
-        # Map label to keys
-        label_to_keys = {
-            "arm": ("LEFT_ARM", "RIGHT_ARM"),
-            "leg": ("LEFT_LEG", "RIGHT_LEG"),
-            "hip": ("LEFT_HIP", "RIGHT_HIP"),
-            "shoulder": ("LEFT_SHOULDER", "RIGHT_SHOULDER"),
-        }
-        
-        if joint_label not in label_to_keys:
+        """Averaged left/right signal for a joint label (reduces jitter)."""
+        keys = self._label_to_keys.get(joint_label)
+        if not keys:
             return None
-        
-        left_key, right_key = label_to_keys[joint_label]
+        left_key, right_key = keys
         left_val = angles.get(left_key)
         right_val = angles.get(right_key)
-        
         if left_val is None or right_val is None:
             return None
-        
         return (float(left_val) + float(right_val)) / 2.0
+
+    def _template_best_joint_key(self, angles: Dict[str, float]) -> Optional[str]:
+        """Pick the highest-weight joint from the template that exists in current angles."""
+        if not self.template or not getattr(self.template, "joints", None):
+            return None
+
+        best_key = None
+        best_weight = -1.0
+        for joint_name, cfg in self.template.joints.items():
+            if joint_name in angles:
+                try:
+                    w = float(cfg.weight)
+                except Exception:
+                    w = 0.0
+                if w > best_weight:
+                    best_weight = w
+                    best_key = joint_name
+        return best_key
+
+    def _template_label_if_pair_available(self, angles: Dict[str, float]) -> Optional[str]:
+        """
+        Return label (e.g. 'arm') ONLY if both sides exist AND have similar template weights.
+        Prevents averaging asymmetric movements (like unilateral dominance).
+        """
+        if not self.template or not getattr(self.template, "joints", None):
+            return None
+
+        for label, (lk, rk) in self._label_to_keys.items():
+            if lk in self.template.joints and rk in self.template.joints:
+                if lk in angles and rk in angles:
+                    try:
+                        wl = float(self.template.joints[lk].weight)
+                        wr = float(self.template.joints[rk].weight)
+                    except Exception:
+                        return None
+
+                    # Only average if weights are similar (symmetrical movement)
+                    if abs(wl - wr) < 0.05:
+                        return label
+        return None
 
     # ---------- view / rotation quality (optional) ----------
 
@@ -447,18 +481,31 @@ class LiveWindowAnalyzer:
 
         # --- choose/lock rep signal (only once per ~5 second window) ---
         if self._rep_signal_key is None and primary_key is not None:
-            # On first call, pick dominant joint pair and lock it
-            dominant_joint = self._get_dominant_joint_pair()
-            if dominant_joint is not None:
-                # Check if we can get the averaged signal
-                avg_signal = self._get_rep_signal_averaged(dominant_joint, angles)
-                if avg_signal is not None:
-                    self._rep_signal_key = dominant_joint  # label like "leg", "arm", etc.
+            # Prefer highest-weight single joint from template
+            tpl_joint = self._template_best_joint_key(angles)
+            if tpl_joint is not None:
+                self._rep_signal_key = tpl_joint
+                self._rep_signal_lock_frames = self._rep_signal_lock_duration
+            else:
+                # Fallback to symmetric pair only if appropriate
+                tpl_label = self._template_label_if_pair_available(angles)
+                if tpl_label is not None:
+                    self._rep_signal_key = tpl_label
                     self._rep_signal_lock_frames = self._rep_signal_lock_duration
                 else:
-                    # Fallback to primary key if averaging fails
-                    self._rep_signal_key = primary_key
-                    self._rep_signal_lock_frames = self._rep_signal_lock_duration
+                    # Final fallback to ROM-dominant behavior
+                    dominant_joint = self._get_dominant_joint_pair()
+                    if dominant_joint is not None:
+                        avg_signal = self._get_rep_signal_averaged(dominant_joint, angles)
+                        if avg_signal is not None:
+                            self._rep_signal_key = dominant_joint
+                            self._rep_signal_lock_frames = self._rep_signal_lock_duration
+                        else:
+                            self._rep_signal_key = primary_key
+                            self._rep_signal_lock_frames = self._rep_signal_lock_duration
+                    else:
+                        self._rep_signal_key = primary_key
+                        self._rep_signal_lock_frames = self._rep_signal_lock_duration
 
         # Decrement lock timer
         if self._rep_signal_lock_frames > 0:
@@ -558,48 +605,80 @@ class LiveWindowAnalyzer:
                 "event": event}
 
     def _calculate_rep_progress(self, angles: Dict[str, float]) -> Optional[float]:
-        """
-        Calculate percentage progress through current rep based on template min/max.
-        Returns 0-100 percentage.
-        """
+        """Template-based rep progress (0-100) driven by the locked rep signal."""
         if not self.template or not angles:
             return None
-        
+
+        joints_info = getattr(self.template, "joints", None)
+        if not joints_info:
+            return None
+
+        key = self._rep_signal_key
+
+        # 1) If we have a locked averaged label signal, compute progress from the averaged template range
+        if isinstance(key, str) and key in self._label_to_keys:
+            lk, rk = self._label_to_keys[key]
+            if lk in joints_info and rk in joints_info:
+                lv = angles.get(lk)
+                rv = angles.get(rk)
+                if lv is not None and rv is not None:
+                    cur = (float(lv) + float(rv)) / 2.0
+                    lcfg = joints_info[lk]
+                    rcfg = joints_info[rk]
+                    tmin = (float(lcfg.min) + float(rcfg.min)) / 2.0
+                    tmax = (float(lcfg.max) + float(rcfg.max)) / 2.0
+                    span = (tmax - tmin)
+                    if span > 1e-6:
+                        return max(0.0, min(100.0, ((cur - tmin) / span) * 100.0))
+
+        # 2) If we have a locked single-joint signal that exists in template, use it
+        if isinstance(key, str) and key in joints_info and key in angles:
+            cur = float(angles[key])
+            cfg = joints_info[key]
+            tmin = float(cfg.min)
+            tmax = float(cfg.max)
+            span = (tmax - tmin)
+            if span > 1e-6:
+                return max(0.0, min(100.0, ((cur - tmin) / span) * 100.0))
+
+        # 3) Otherwise, pick best template joint available now and use its range
+        best_joint = self._template_best_joint_key(angles)
+        if best_joint is not None and best_joint in joints_info and best_joint in angles:
+            cur = float(angles[best_joint])
+            cfg = joints_info[best_joint]
+            tmin = float(cfg.min)
+            tmax = float(cfg.max)
+            span = (tmax - tmin)
+            if span > 1e-6:
+                return max(0.0, min(100.0, ((cur - tmin) / span) * 100.0))
+
+        # 4) Fallback: weighted average across all template joints
         try:
-            joints_info = self.template.joints
-            if not joints_info:
-                return None
-            
             progress_scores = []
-            
             for joint_name, joint_config in joints_info.items():
                 if joint_name in angles:
-                    current_angle = angles[joint_name]
+                    current_angle = float(angles[joint_name])
                     min_angle = float(joint_config.min)
                     max_angle = float(joint_config.max)
                     weight = float(joint_config.weight)
-                    
-                    # Calculate progress as percentage within the range
+
                     if current_angle < min_angle:
-                        progress = 0
+                        progress = 0.0
                     elif current_angle > max_angle:
-                        progress = 100
+                        progress = 100.0
                     else:
                         range_size = max_angle - min_angle
-                        current_progress = current_angle - min_angle
-                        progress = (current_progress / range_size) * 100 if range_size > 0 else 0
-                    
-                    # Weight by joint importance
+                        progress = ((current_angle - min_angle) / range_size) * 100.0 if range_size > 1e-6 else 0.0
+
                     progress_scores.append((progress, weight))
-            
+
             if progress_scores:
-                # Calculate weighted average
                 total_weighted = sum(p * w for p, w in progress_scores)
                 total_weight = sum(w for _, w in progress_scores)
-                return total_weighted / total_weight if total_weight > 0 else None
+                return (total_weighted / total_weight) if total_weight > 1e-9 else None
         except Exception as e:
             print(f"Error calculating rep progress: {e}")
-        
+
         return None
 
 
