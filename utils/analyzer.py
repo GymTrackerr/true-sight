@@ -73,9 +73,20 @@ class LiveWindowAnalyzer:
         self.min_angle_samples = min_angle_samples
         self.view_badness_threshold = view_badness_threshold
 
+        # --- sticky primary/secondary selection ---
+        self._prim_key = None
+        self._sec_key = None
+        self._switch_margin = 8.0          # degrees of ROM advantage required to switch
+        self._switch_confirm_frames = max(6, int(0.5 * self.fps))  # ~0.5s at current fps
+        self._switch_counter = 0
+        self._candidate_key = None
+
         # --- rep counting state ---
         self.rep_count = 0
         self._active_key = None          # which angle we are counting reps from
+        self._rep_signal_key = None      # locked signal for rep counting (left/right averaged)
+        self._rep_signal_lock_frames = 0  # frames remaining to keep signal locked
+        self._rep_signal_lock_duration = max(150, int(5.0 * self.fps))  # lock for 5 seconds
         self._ema = None                 # smoothed angle value
         self._ema_alpha = 0.25           # smoothing strength (0..1), higher = less smooth
         self._phase = "search"           # "search" | "down" | "up"
@@ -86,7 +97,7 @@ class LiveWindowAnalyzer:
 
         self._last_rep_frame = -10**9
         self._min_rep_frames = max(6, int(0.35 * self.fps))   # shortest plausible rep
-        self._min_rom_deg = 18.0                              # ignore tiny movements
+        self._min_rom_deg = 12.0                              # base min ROM (was 18.0, lowered for 15 fps)
         self._hysteresis_deg = 6.0                             # how much reversal needed
         self._key_hold_frames = max(10, int(0.35 * self.fps))  # keep key stable a bit
         self._key_hold_left = 0
@@ -135,7 +146,7 @@ class LiveWindowAnalyzer:
         window_end = self.frame_index
 
         rom = self._rom_current_window(min_samples=self.min_angle_samples)
-        primary, secondary = self._pick_primary_secondary(rom)
+        primary, secondary = self._stable_primary_secondary(rom)
 
         symmetry = {}
         for label, lk, rk in self.symmetry_pairs:
@@ -149,7 +160,7 @@ class LiveWindowAnalyzer:
         drift = self._torso_drift()
 
         view_badness = self._view_badness()
-        rep_info = self._update_rep_counter(primary_key=primary[0] if primary else None, angles=angles)
+        rep_info = self._update_rep_counter(primary_key=primary[0] if primary else None, angles=angles, rom=rom, view_badness=view_badness)
 
         return LiveMetrics(
             frame_index=self.frame_index,
@@ -189,6 +200,63 @@ class LiveWindowAnalyzer:
         items = sorted(rom.items(), key=lambda kv: kv[1], reverse=True)
         primary = items[0]
         secondary = items[1] if len(items) > 1 else None
+        return primary, secondary
+
+    def _stable_primary_secondary(self, rom: dict[str, float]) -> Tuple[Optional[Tuple[str, float]], Optional[Tuple[str, float]]]:
+        """
+        Sticky primary/secondary selection: only switch if new candidate wins by margin
+        and stays consistent for N frames. Prevents flapping due to jitter.
+        """
+        if not rom:
+            return None, None
+
+        ranked = sorted(rom.items(), key=lambda kv: kv[1], reverse=True)
+        best_key, best_rom = ranked[0]
+        second = ranked[1] if len(ranked) > 1 else None
+
+        # Initialize on first call
+        if self._prim_key is None:
+            self._prim_key = best_key
+            self._sec_key = second[0] if second else None
+            return (self._prim_key, rom[self._prim_key]), (self._sec_key, rom[self._sec_key]) if self._sec_key else None
+
+        # If current primary missing, swap immediately
+        if self._prim_key not in rom:
+            self._prim_key = best_key
+            self._sec_key = second[0] if second else None
+            self._switch_counter = 0
+            self._candidate_key = None
+            return (self._prim_key, rom[self._prim_key]), (self._sec_key, rom[self._sec_key]) if self._sec_key else None
+
+        cur_rom = rom[self._prim_key]
+
+        # Only consider switching if new best clearly better (margin threshold)
+        if best_key != self._prim_key and (best_rom - cur_rom) >= self._switch_margin:
+            if self._candidate_key != best_key:
+                self._candidate_key = best_key
+                self._switch_counter = 1
+            else:
+                self._switch_counter += 1
+
+            if self._switch_counter >= self._switch_confirm_frames:
+                self._prim_key = best_key
+                self._sec_key = second[0] if second else None
+                self._switch_counter = 0
+                self._candidate_key = None
+        else:
+            self._switch_counter = 0
+            self._candidate_key = None
+
+        # Recompute secondary based on ranked list excluding primary
+        sec_key = None
+        for k, _ in ranked:
+            if k != self._prim_key:
+                sec_key = k
+                break
+        self._sec_key = sec_key
+
+        primary = (self._prim_key, rom.get(self._prim_key, 0.0))
+        secondary = (self._sec_key, rom.get(self._sec_key, 0.0)) if self._sec_key else None
         return primary, secondary
 
     @staticmethod
@@ -244,6 +312,51 @@ class LiveWindowAnalyzer:
         dists = [((x - x0) ** 2 + (y - y0) ** 2) ** 0.5 for (x, y) in pts]
         return max(dists) if dists else None
 
+    def _get_dominant_joint_pair(self) -> Optional[str]:
+        """
+        Identify which joint pair (arm, leg, hip, shoulder) has highest ROM.
+        Returns the label name, or None if insufficient data.
+        """
+        rom = self._rom_current_window(min_samples=self.min_angle_samples)
+        if not rom:
+            return None
+        
+        pair_roms = {}
+        for label, left_key, right_key in self.symmetry_pairs:
+            left_rom = rom.get(left_key, 0.0)
+            right_rom = rom.get(right_key, 0.0)
+            pair_roms[label] = max(left_rom, right_rom)  # take the larger of the pair
+        
+        if not pair_roms:
+            return None
+        
+        return max(pair_roms, key=pair_roms.get)
+
+    def _get_rep_signal_averaged(self, joint_label: str, angles: Dict[str, float]) -> Optional[float]:
+        """
+        Get averaged left/right signal for a joint (e.g., "leg" -> (LEFT_LEG + RIGHT_LEG)/2).
+        Reduces jitter from single joint tracking.
+        """
+        # Map label to keys
+        label_to_keys = {
+            "arm": ("LEFT_ARM", "RIGHT_ARM"),
+            "leg": ("LEFT_LEG", "RIGHT_LEG"),
+            "hip": ("LEFT_HIP", "RIGHT_HIP"),
+            "shoulder": ("LEFT_SHOULDER", "RIGHT_SHOULDER"),
+        }
+        
+        if joint_label not in label_to_keys:
+            return None
+        
+        left_key, right_key = label_to_keys[joint_label]
+        left_val = angles.get(left_key)
+        right_val = angles.get(right_key)
+        
+        if left_val is None or right_val is None:
+            return None
+        
+        return (float(left_val) + float(right_val)) / 2.0
+
     # ---------- view / rotation quality (optional) ----------
 
     def _view_badness(self) -> Optional[float]:
@@ -287,34 +400,56 @@ class LiveWindowAnalyzer:
         if badness > 1.0:
             badness = 1.0
         return badness
-    def _update_rep_counter(self, primary_key: Optional[str], angles: Dict[str, float]) -> Dict[str, Any]:
+    def _update_rep_counter(self, primary_key: Optional[str], angles: Dict[str, float], rom: Dict[str, float], view_badness: Optional[float]) -> Dict[str, Any]:
         """
-        Generic rep counter on a single angle signal.
-        Detects cycles using hysteresis and ROM thresholds.
-        Returns {"key":..., "rom":..., "event": {...} or None}
+        Improved rep counter with:
+        - Locked rep signal (doesn't change mid-set)
+        - Left/right averaging for smoother signal
+        - Dynamic ROM threshold based on recent window ROM
+        - View badness gating (don't count if quality too low)
+        - Velocity-based peak/trough detection
         """
-        # --- choose / hold active key ---
-        if self._active_key is None:
-            self._active_key = primary_key
+        # --- gate: skip rep counting if view quality too bad ---
+        if view_badness is not None and view_badness > self.view_badness_threshold:
+            return {"key": self._rep_signal_key, "rom": None, "event": None}
 
-        # keep key stable for a bit to avoid flapping
-        if primary_key and primary_key != self._active_key:
-            if self._key_hold_left <= 0:
-                # allow switch only if current active key isn't present
-                if self._active_key not in angles:
-                    self._active_key = primary_key
-                    self._key_hold_left = self._key_hold_frames
-            else:
-                self._key_hold_left -= 1
-        else:
-            if self._key_hold_left > 0:
-                self._key_hold_left -= 1
+        # --- choose/lock rep signal (only once per ~5 second window) ---
+        if self._rep_signal_key is None and primary_key is not None:
+            # On first call, pick dominant joint pair and lock it
+            dominant_joint = self._get_dominant_joint_pair()
+            if dominant_joint is not None:
+                # Check if we can get the averaged signal
+                avg_signal = self._get_rep_signal_averaged(dominant_joint, angles)
+                if avg_signal is not None:
+                    self._rep_signal_key = dominant_joint  # label like "leg", "arm", etc.
+                    self._rep_signal_lock_frames = self._rep_signal_lock_duration
+                else:
+                    # Fallback to primary key if averaging fails
+                    self._rep_signal_key = primary_key
+                    self._rep_signal_lock_frames = self._rep_signal_lock_duration
 
-        key = self._active_key
-        if not key or key not in angles:
-            return {"key": key, "rom": None, "event": None}
+        # Decrement lock timer
+        if self._rep_signal_lock_frames > 0:
+            self._rep_signal_lock_frames -= 1
 
-        x = float(angles[key])
+        # If lock expired and primary changed substantially, allow re-selection
+        if self._rep_signal_lock_frames <= 0:
+            self._rep_signal_key = None
+
+        # Get the actual signal value
+        signal_value = None
+        if self._rep_signal_key is not None:
+            # Try averaged signal first
+            if self._rep_signal_key in ["arm", "leg", "hip", "shoulder"]:
+                signal_value = self._get_rep_signal_averaged(self._rep_signal_key, angles)
+            # Fallback to direct angle key
+            if signal_value is None and self._rep_signal_key in angles:
+                signal_value = angles.get(self._rep_signal_key)
+
+        if signal_value is None:
+            return {"key": self._rep_signal_key, "rom": None, "event": None}
+
+        x = float(signal_value)
 
         # --- EMA smoothing ---
         if self._ema is None:
@@ -334,9 +469,12 @@ class LiveWindowAnalyzer:
 
         event = None
 
+        # --- dynamic ROM threshold based on window ROM ---
+        window_rom_value = max(rom.values()) if rom else 0.0
+        dynamic_min_rom = max(self._min_rom_deg, 0.35 * window_rom_value)
+
         # --- state machine ---
         if self._phase == "search":
-            # Start tracking by assuming we're going "down" toward a min
             self._phase = "down"
             self._min_val = v; self._min_i = i
             self._max_val = v; self._max_i = i
@@ -358,20 +496,20 @@ class LiveWindowAnalyzer:
 
             # If we've dropped enough from the max, we reversed -> potential rep complete
             if v < self._max_val - self._hysteresis_deg:
-                rom = float(self._max_val - self._min_val)
+                rom_value = float(self._max_val - self._min_val)
                 frames_since_last = i - self._last_rep_frame
                 rep_duration = (self._max_i - self._min_i) if (self._max_i is not None and self._min_i is not None) else None
 
                 ok_duration = (frames_since_last >= self._min_rep_frames)
-                ok_rom = (rom >= self._min_rom_deg)
+                ok_rom = (rom_value >= dynamic_min_rom)
 
                 if ok_duration and ok_rom:
                     self.rep_count += 1
                     self._last_rep_frame = i
                     event = {
                         "rep": self.rep_count,
-                        "key": key,
-                        "rom": rom,
+                        "key": self._rep_signal_key,
+                        "rom": rom_value,
                         "min": self._min_val,
                         "max": self._max_val,
                         "min_frame": self._min_i,
@@ -379,10 +517,10 @@ class LiveWindowAnalyzer:
                         "counted_at": i,
                     }
 
-                # reset for next rep: start searching for next minimum
+                # reset for next rep
                 self._phase = "down"
                 self._min_val = v; self._min_i = i
                 self._max_val = v; self._max_i = i
 
-        return {"key": key, "rom": (self._max_val - self._min_val) if (self._max_val is not None and self._min_val is not None) else None,
+        return {"key": self._rep_signal_key, "rom": (self._max_val - self._min_val) if (self._max_val is not None and self._min_val is not None) else None,
                 "event": event}

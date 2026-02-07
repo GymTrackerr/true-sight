@@ -2,6 +2,8 @@ from ultralytics import YOLO
 from utils.joints import Joints, ConnectedJoints, frame_save
 from utils.exercisedb import ExerciseDBSearch
 from utils.analyzer import LiveWindowAnalyzer
+from utils.overlay import draw_pose_and_metrics
+
 import torch
 from pathlib import Path
 import requests
@@ -22,7 +24,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def load_model():
-    model_path = Path(__file__).parent.parent / "models" / "yolo26n-pose.pt"
+    model_path = Path(__file__).parent.parent / "models" / "yolo26s-pose.pt"
     
     # Create models directory if it doesn't exist
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,7 +102,7 @@ class Processing:
 
         analyzer = LiveWindowAnalyzer(fps=fps, window_seconds=1.0)
         live_out = []
-
+        m = None
         while True:
             ret, frame = cap.read()
             print(f"Processing frame {frame_count+1}/{total_frames} / {exercise}")
@@ -161,12 +163,16 @@ class Processing:
             #                 })
             
             # Draw skeleton if requested
-            if draw_skeleton == 'true' and len(results) > 0:
-                # Plot the pose skeleton on the frame
-                output_frame = results[0].plot()  # Returns numpy array (BGR)
-            else:
-                output_frame = frame
-            
+            # if 
+                # Decide what to write out
+            output_frame = frame
+
+            if draw_skeleton == 'true':
+                # Draw using our overlay (works even if YOLO has no detections)
+                metrics_dict = m.to_dict() if m else None
+                person0 = frame_data[0] if (len(frame_data) > 0 and frame_data[0].has_detections()) else None
+                output_frame = draw_pose_and_metrics(output_frame, person0, metrics_dict)
+
             # Write frame to output video
             out.write(output_frame)
             frame_count += 1
