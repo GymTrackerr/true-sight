@@ -1,6 +1,7 @@
 from ultralytics import YOLO
-from utils.joints import Joints, frame_save
+from utils.joints import Joints, ConnectedJoints, frame_save
 from utils.exercisedb import ExerciseDBSearch
+from utils.analyzer import LiveWindowAnalyzer
 import torch
 from pathlib import Path
 import requests
@@ -11,7 +12,6 @@ import json
 import cv2
 import os
 
-api_base_url = "http://192.168.3.21:5002"
 CACHE_DIR = Path(__file__).parent.parent / "cache" / "analysis"
 OUTPUT_DIR = Path(__file__).parent.parent / "static" / "output"
 
@@ -95,11 +95,15 @@ class Processing:
         print(f"Processing video: {exercise_name}")
         print(f"Total frames: {total_frames}")
 
-        results = self.model(video_path, save=True)
+        # results = self.model(video_path, save=True)
+        exercise = self.find_exercise(exercise_name)
+
+        analyzer = LiveWindowAnalyzer(fps=fps, window_seconds=1.0)
+        live_out = []
 
         while True:
             ret, frame = cap.read()
-            print(f"Processing frame {frame_count+1}/{total_frames}")
+            print(f"Processing frame {frame_count+1}/{total_frames} / {exercise}")
             if not ret:
                 break
             
@@ -113,20 +117,48 @@ class Processing:
             
             frame_joints_array.append(frame_data)
             
-            # Compare with previous frame if exists
-            if len(frame_joints_array) >= 2:
-                prev_frame = frame_joints_array[-2]
-                curr_frame = frame_joints_array[-1]
+            # should only be one person in frame, so take first result
+            ## TODO: Handle multiple people in frame in future
+
+
+            # Default: no data this frame
+            angles = {}
+            torso_norm = None
+            seglens = None
+
+            if len(frame_data) > 0 and frame_data[0].has_detections():
+                curr = frame_data[0]
+
+                angles = curr.angles_dict()
+
+                tc = curr.torso_center()
+                sc = curr.scale()
+                torso_norm = (tc[0]/sc, tc[1]/sc) if (tc and sc) else None
+
+                seglens = curr.segment_lengths_norm()
+
+                m = analyzer.update(angles=angles, torso_center_norm=torso_norm, seglens_norm=seglens)
+
+            if m:
+                live_out.append(m.to_dict())
+
+
+
+
+            # # Compare with previous frame if exists
+            # if len(frame_joints_array) >= 2:
+            #     prev_frame = frame_joints_array[-2]
+            #     curr_frame = frame_joints_array[-1]
                 
-                if len(prev_frame) > 0 and len(curr_frame) > 0:
-                    # Compare first person in frame (primary subject) - only if both frames have detections
-                    if prev_frame[0].has_detections() and curr_frame[0].has_detections():
-                        changes = prev_frame[0].find_changing_joints(curr_frame[0])
-                        if changes:  # Only add if there are actual changes
-                            frame_comparisons.append({
-                                'frame': frame_count,
-                                'changes': changes
-                            })
+            #     if len(prev_frame) > 0 and len(curr_frame) > 0:
+            #         # Compare first person in frame (primary subject) - only if both frames have detections
+            #         if prev_frame[0].has_detections() and curr_frame[0].has_detections():
+            #             changes = prev_frame[0].find_changing_joints(curr_frame[0])
+            #             if changes:  # Only add if there are actual changes
+            #                 frame_comparisons.append({
+            #                     'frame': frame_count,
+            #                     'changes': changes
+            #                 })
             
             # Draw skeleton if requested
             if draw_skeleton == 'true' and len(results) > 0:
@@ -145,10 +177,14 @@ class Processing:
         # Release resources
         cap.release()
         out.release()
-        
+
+        with open(output_dir / f"{input_filename}_live_metrics.json", "w") as f:
+            json.dump(live_out, f, indent=2)
+
         print(f"\nAnalysis complete!")
         print(f"Total frames processed: {frame_count}")
         print(f"Total frame comparisons: {len(frame_comparisons)}")
+        json.dump(frame_comparisons, open(output_dir / f"{input_filename}_comparisons.json", 'w'), indent=2)
         print(f"Video saved to: {output_path}")
         
         # Create completion marker JSON file
@@ -186,8 +222,12 @@ class Processing:
         if (not found):
             raise ValueError(f"Exercise '{exercise_name}' not found in ExerciseDB")
 
-        cur0 = self.get_results(api_base_url+found.get('images')[0])
-        cur1 = self.get_results(api_base_url+found.get('images')[1])
+        images = self.edb.get_image_urls(found)
+        if len(images) < 2:
+            raise ValueError(f"Exercise '{exercise_name}' does not have enough reference images for comparison")
+        
+        cur0 = self.get_results(images[0])
+        cur1 = self.get_results(images[1])
 
         changes = cur0[0].find_changing_joints(cur1[0])
         print(f"Analysis complete: {changes[0]} with diff {changes[1]}")

@@ -3,7 +3,8 @@ import json
 import os
 from pathlib import Path
 
-api_base_url = "http://192.168.3.21:5002"
+# api_base_url = "http://192.168.3.21:5002"
+api_base_url = "http://127.0.0.1:5002"
 CACHE_FILE = Path(__file__).parent.parent / "cache" / "exercise_cache.json"
 
 class ExerciseDBSearch:
@@ -48,7 +49,16 @@ class ExerciseDBSearch:
             print(f"Cache saved to {CACHE_FILE}")
         except IOError as e:
             print(f"Warning: Could not save cache file: {e}")
-
+    def get_image_urls(self, exercise):
+        """Get image URLs for an exercise, with error handling"""
+        if not exercise:
+            raise ValueError("Exercise data is empty or None")
+        
+        images = exercise.get('images', [])
+        if len(images) < 2:
+            raise ValueError(f"Exercise '{exercise.get('name', 'unknown')}' does not have enough images (found {len(images)})")
+        
+        return [api_base_url + img for img in images[:2]]
     def search(self, exercise_id: str):
         """Search for exercise by ID or name"""
         if not exercise_id:
