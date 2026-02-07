@@ -5,9 +5,6 @@ from uuid import uuid4
 import os
 import traceback
 import json
-import cv2
-import tempfile
-import shutil
 
 proc = Processing()
 app = Flask(__name__, static_folder='static')
@@ -20,79 +17,6 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 def run_flask_server():
     app.run(host="0.0.0.0", port=3000, debug=False)
-
-def transcode_video(input_path, target_fps=15, target_width=640):
-    """Transcode video to lower framerate and resolution"""
-    try:
-        cap = cv2.VideoCapture(input_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        if fps == 0 or width == 0 or height == 0:
-            print(f"Warning: Could not read video properties, skipping transcode")
-            cap.release()
-            return
-        
-        # Calculate aspect ratio and new height
-        aspect_ratio = height / width
-        new_width = target_width
-        new_height = int(target_width * aspect_ratio)
-        
-        # Write to temporary file first
-        temp_fd, temp_path = tempfile.mkstemp(suffix='.mp4')
-        os.close(temp_fd)
-        
-        # Setup video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(temp_path, fourcc, target_fps, (new_width, new_height))
-        
-        if not out.isOpened():
-            print(f"Warning: Could not open video writer, skipping transcode")
-            cap.release()
-            os.remove(temp_path)
-            return
-        
-        frame_count = 0
-        frame_skip = max(1, round(fps / target_fps))  # Skip frames to reduce framerate (round up for more aggressive skipping)
-        
-        print(f"Transcoding video: {fps}fps -> {target_fps}fps, {width}x{height} -> {new_width}x{new_height}, skipping every {frame_skip} frames")
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            # Skip frames to reduce framerate
-            if frame_count % frame_skip == 0:
-                resized = cv2.resize(frame, (new_width, new_height))
-                out.write(resized)
-            
-            frame_count += 1
-        
-        cap.release()
-        out.release()
-        
-        frames_written = frame_count // frame_skip
-        print(f"Video transcoding complete: {frames_written} frames written")
-        
-        # Replace original file with transcoded version
-        if frames_written > 0:
-            shutil.move(temp_path, input_path)
-            print(f"Original video replaced with transcoded version")
-        else:
-            print(f"Warning: No frames written, keeping original video")
-            os.remove(temp_path)
-        
-    except Exception as e:
-        print(f"Warning: Video transcode failed: {str(e)}")
-        # Continue anyway - original video will be used
-        try:
-            cap.release()
-            if 'temp_path' in locals() and os.path.exists(temp_path):
-                os.remove(temp_path)
-        except:
-            pass
 
 @app.route('/', methods=['GET', 'POST'])
 def home():

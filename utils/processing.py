@@ -14,8 +14,6 @@ import numpy as np
 import json
 import cv2
 import os
-import tempfile
-import shutil
 
 CACHE_DIR = Path(__file__).parent.parent / "cache" / "analysis"
 OUTPUT_DIR = Path(__file__).parent.parent / "static" / "output"
@@ -105,85 +103,6 @@ class ScaledFrameSave:
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def transcode_video(input_path, target_fps=15, target_width=640, output_path=None):
-    """Transcode video to lower framerate and resolution"""
-    try:
-        cap = cv2.VideoCapture(input_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        if fps == 0 or width == 0 or height == 0:
-            print(f"Warning: Could not read video properties, skipping transcode")
-            cap.release()
-            return
-        
-        # Calculate aspect ratio and new height
-        aspect_ratio = height / width
-        new_width = target_width
-        new_height = int(target_width * aspect_ratio)
-        
-        # Use output_path if provided, otherwise use temp file
-        if output_path is None:
-            temp_fd, output_path = tempfile.mkstemp(suffix='.mp4')
-            os.close(temp_fd)
-            is_temp = True
-        else:
-            is_temp = False
-        
-        # Setup video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, target_fps, (new_width, new_height))
-        
-        if not out.isOpened():
-            print(f"Warning: Could not open video writer, skipping transcode")
-            cap.release()
-            if is_temp and os.path.exists(output_path):
-                os.remove(output_path)
-            return
-        
-        frame_count = 0
-        frame_skip = max(1, round(fps / target_fps))
-        
-        print(f"Transcoding video: {fps}fps -> {target_fps}fps, {width}x{height} -> {new_width}x{new_height}, skipping every {frame_skip} frames")
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            # Skip frames to reduce framerate
-            if frame_count % frame_skip == 0:
-                resized = cv2.resize(frame, (new_width, new_height))
-                out.write(resized)
-            
-            frame_count += 1
-        
-        cap.release()
-        out.release()
-        
-        frames_written = frame_count // frame_skip
-        print(f"Video transcoding complete: {frames_written} frames written")
-        
-        # Replace original file with transcoded version only if output_path not explicitly provided
-        if is_temp and frames_written > 0:
-            shutil.move(output_path, input_path)
-            print(f"Original video replaced with transcoded version")
-        elif frames_written == 0:
-            print(f"Warning: No frames written")
-            if is_temp and os.path.exists(output_path):
-                os.remove(output_path)
-        
-    except Exception as e:
-        print(f"Warning: Video transcode failed: {str(e)}")
-        # Continue anyway - original video will be used
-        try:
-            cap.release()
-            if 'output_path' in locals() and os.path.exists(output_path):
-                os.remove(output_path)
-        except:
-            pass
-
 def load_model():
     model_path = Path(__file__).parent.parent / "models" / "yolo26s-pose.pt"
     
@@ -213,7 +132,7 @@ class Processing:
     def __init__(self):
         pass
 
-    def process_video(self, video_path, exercise_name, exercise_data, draw_skeleton, output_dir=None):
+    def process_video(self, video_path, exercise_name, exercise_data, draw_skeleton, output_dir=None, target_fps=15, target_width=640):
         """
         Process video with YOLO pose detection and track joint changes throughout.
         
@@ -223,6 +142,8 @@ class Processing:
             exercise_data: Reference exercise data from ExerciseDB
             draw_skeleton: Boolean to draw skeleton on output video
             output_dir: Directory to save output video (default: output/)
+            target_fps: Target FPS for processing (default: 15)
+            target_width: Target width for processing (default: 640)
         
         Returns:
             output_path: Path to saved processed video
@@ -234,51 +155,43 @@ class Processing:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Get original video properties before transcoding
-        cap_orig = cv2.VideoCapture(video_path)
-        orig_fps = cap_orig.get(cv2.CAP_PROP_FPS)
-        orig_width = int(cap_orig.get(cv2.CAP_PROP_FRAME_WIDTH))
-        orig_height = int(cap_orig.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        orig_total_frames = int(cap_orig.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap_orig.release()
+        # Open video to get properties
+        cap = cv2.VideoCapture(video_path)
+        orig_fps = cap.get(cv2.CAP_PROP_FPS)
+        orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        orig_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        print(f"Original video resolution: {orig_width}x{orig_height}")
-        print(f"Original video FPS: {orig_fps}")
+        print(f"Original video: {orig_width}x{orig_height} @ {orig_fps} fps")
         
-        # Create a temporary transcoded video for processing
-        import uuid
-        temp_video = f"/tmp/temp_{uuid.uuid4().hex}.mp4"
-        print(f"Transcoding to 640p @ 15fps for faster processing...")
-        transcode_video(video_path, target_fps=15, target_width=640, output_path=temp_video)
+        # Calculate processing resolution (maintain aspect ratio)
+        aspect_ratio = orig_height / orig_width
+        proc_width = target_width
+        proc_height = int(target_width * aspect_ratio)
         
-        # Open transcoded video for processing
-        cap = cv2.VideoCapture(temp_video)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # Calculate frame skip to match target fps
+        frame_skip = max(1, round(orig_fps / target_fps))
+        output_fps = orig_fps / frame_skip
         
-        # Calculate scale factors from transcoded to original resolution
-        scale_x = orig_width / width
-        scale_y = orig_height / height
+        print(f"Processing: {proc_width}x{proc_height}, skipping {frame_skip} frames ({output_fps:.1f} fps output)")
         
-        print(f"Processing resolution: {width}x{height}")
-        print(f"Scale factors: X={scale_x:.2f}, Y={scale_y:.2f}")
+        # Calculate scale factors
+        scale_x = orig_width / proc_width
+        scale_y = orig_height / proc_height
         
-        # Generate output filename (just UUID.mp4)
+        # Generate output filename
         input_filename = Path(video_path).stem
         output_filename = f"{input_filename}.mp4"
         output_path = output_dir / output_filename
         
-        # Setup video writer for output (original resolution, but reduced fps)
+        # Setup video writer for output (original resolution, reduced fps)
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(str(output_path), fourcc, fps, (orig_width, orig_height))
+        out = cv2.VideoWriter(str(output_path), fourcc, output_fps, (orig_width, orig_height))
         
-        # Verify video writer opened successfully
         if not out.isOpened():
             raise RuntimeError(f"Failed to open video writer for {output_path}")
         
-        print(f"Output: {orig_width}x{orig_height} @ {fps} fps -> {output_path}")
+        print(f"Output: {orig_width}x{orig_height} @ {output_fps:.1f} fps -> {output_path}")
         
         # Process video frame by frame
         frame_joints_array = []  # Store all frame joints
@@ -286,7 +199,7 @@ class Processing:
         frame_count = 0
         
         print(f"Processing video: {exercise_name}")
-        print(f"Total frames: {total_frames}")
+        print(f"Total frames: {orig_total_frames}")
 
         # results = self.model(video_path, save=True)
         exercise = self.find_exercise(exercise_name)
@@ -304,50 +217,37 @@ class Processing:
             except Exception as e:
                 print(f"Warning: Could not load template: {e}")
 
-        analyzer = LiveWindowAnalyzer(fps=fps, window_seconds=1.0, template=template)
+        analyzer = LiveWindowAnalyzer(fps=output_fps, window_seconds=1.0, template=template)
         live_out = []
         m = None
-        last_rep_score = None  # Track last rep score for display
+        last_rep_score = None
         
-        # Open original video for output frames
-        cap_orig = cv2.VideoCapture(video_path)
-        
-        # Calculate frame skip for original video to match transcoded fps
-        frame_skip_orig = max(1, round(orig_fps / fps))
-        orig_frame_count = 0
+        frame_count = 0
+        output_frame_count = 0
         
         while True:
-            ret, frame_lowres = cap.read()
+            ret, frame_orig = cap.read()
             
             if not ret:
                 break
             
-            # Read from original video, skipping frames to match transcoded fps
-            frame_orig = None
-            while True:
-                ret_orig, temp_frame = cap_orig.read()
-                orig_frame_count += 1
-                
-                if not ret_orig:
-                    break
-                
-                # Keep this frame if it matches the skip pattern
-                if (orig_frame_count - 1) % frame_skip_orig == 0:
-                    frame_orig = temp_frame
-                    break
+            # Skip frames to reduce fps
+            if frame_count % frame_skip != 0:
+                frame_count += 1
+                continue
             
-            if frame_orig is None:
-                break
+            output_frame_count += 1
             
-            # Run YOLO pose detection on low-res frame
-            results = self.model(frame_lowres)
+            # Resize for processing
+            frame_proc = cv2.resize(frame_orig, (proc_width, proc_height))
             
-            # Save frame joints (coordinates are in low-res space)
+            # Run YOLO pose detection
+            results = self.model(frame_proc)
+            
+            # Save frame joints (scale coordinates back to original resolution)
             frame_data = []
             for result in results:
-                # Create a scaled frame_save object that returns coordinates scaled back to full res
                 frame_obj = frame_save(result)
-                # Wrap it to scale coordinates back
                 frame_data.append(ScaledFrameSave(frame_obj, scale_x, scale_y))
             
             frame_joints_array.append(frame_data)
@@ -416,21 +316,12 @@ class Processing:
             out.write(output_frame)
             frame_count += 1
             
-            if frame_count % 30 == 0:
-                print(f"Processed {frame_count}/{total_frames} frames")
+            if output_frame_count % 30 == 0:
+                print(f"Processed {output_frame_count} output frames")
         
         # Release resources
         cap.release()
-        cap_orig.release()
         out.release()
-        
-        # Clean up temporary video file
-        try:
-            if os.path.exists(temp_video):
-                os.remove(temp_video)
-                print(f"Cleaned up temporary video file")
-        except:
-            pass
 
         with open(output_dir / f"{input_filename}_live_metrics.json", "w") as f:
             json.dump(live_out, f, indent=2)
