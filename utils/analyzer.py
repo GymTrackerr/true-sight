@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections import deque
 from typing import Deque, Dict, Optional, Tuple, Any, List
+from utils.templates import ExerciseTemplate
 
 
 @dataclass
@@ -30,6 +31,7 @@ class LiveMetrics:
     rep_event: Optional[dict]   # populated only when a rep is counted
     rep_rom: Optional[float]
     rep_key: Optional[str]
+    rep_score: Optional[dict]   # populated when rep is scored against template
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -47,6 +49,7 @@ class LiveMetrics:
             "rep_event": self.rep_event,
             "rep_rom": self.rep_rom,
             "rep_key": self.rep_key,
+            "rep_score": self.rep_score,
         }
 
 
@@ -67,9 +70,11 @@ class LiveWindowAnalyzer:
         min_angle_samples: int = 5,
         symmetry_pairs: Optional[List[Tuple[str, str, str]]] = None,
         view_badness_threshold: float = 0.25,
+        template: Optional[ExerciseTemplate] = None,
     ):
         self.fps = max(1, int(fps))
         self.win = max(5, int(round(window_seconds * self.fps)))
+        self.template = template  # Optional exercise template for scoring reps
         self.min_angle_samples = min_angle_samples
         self.view_badness_threshold = view_badness_threshold
 
@@ -101,6 +106,9 @@ class LiveWindowAnalyzer:
         self._hysteresis_deg = 6.0                             # how much reversal needed
         self._key_hold_frames = max(10, int(0.35 * self.fps))  # keep key stable a bit
         self._key_hold_left = 0
+        
+        # Rep frame tracking for template scoring
+        self._rep_frames: Deque[Dict[str, float]] = deque(maxlen=500)  # store frames for current rep
 
         # (label, left_key, right_key)
         self.symmetry_pairs = symmetry_pairs or [
@@ -161,6 +169,22 @@ class LiveWindowAnalyzer:
 
         view_badness = self._view_badness()
         rep_info = self._update_rep_counter(primary_key=primary[0] if primary else None, angles=angles, rom=rom, view_badness=view_badness)
+        
+        # Track frames for rep scoring
+        self._rep_frames.append({k: float(v) for k, v in angles.items()})
+        
+        # Score rep against template if available
+        rep_score = None
+        if rep_info.get("event") is not None and self.template is not None:
+            # A rep was just completed, score it
+            rep_score = score_rep_against_template(self.template, list(self._rep_frames))
+            self._rep_frames.clear()  # Reset for next rep
+            print(f"\n🎯 REP #{rep_info['event']['rep']} SCORED:")
+            print(f"   Overall Quality: {rep_score['overall_score']:.0%}")
+            print(f"   Matches Template: {'✓' if rep_score['matches_template'] else '✗'}")
+            for joint, scores in rep_score['joint_scores'].items():
+                status = "✓" if (scores['is_within_range'] and scores['is_within_tolerance']) else "✗"
+                print(f"   {joint}: {scores['score']:.0%} {status}")
 
         return LiveMetrics(
             frame_index=self.frame_index,
@@ -178,6 +202,7 @@ class LiveWindowAnalyzer:
             rep_event=rep_info.get("event"),
             rep_rom=rep_info.get("rom"),
             rep_key=rep_info.get("key"),
+            rep_score=rep_score,
         )
 
     # ---------- core computations (window-based) ----------
@@ -524,3 +549,139 @@ class LiveWindowAnalyzer:
 
         return {"key": self._rep_signal_key, "rom": (self._max_val - self._min_val) if (self._max_val is not None and self._min_val is not None) else None,
                 "event": event}
+
+
+def score_rep_against_template(
+    template: ExerciseTemplate,
+    rep_angle_frames: List[Dict[str, float]],
+) -> Dict[str, Any]:
+    """
+    Score how well a rep (sequence of angle frames) matches an exercise template.
+    
+    Args:
+        template: ExerciseTemplate with joint ranges and tolerances
+        rep_angle_frames: List of angle dicts from start to end of rep (one per frame)
+    
+    Returns:
+        {
+            "overall_score": 0.0-1.0,  # weighted average of joint scores
+            "joint_scores": {
+                "JOINT_NAME": {
+                    "score": 0.0-1.0,
+                    "rom": actual_rom,
+                    "expected_rom": template_delta,
+                    "is_within_range": bool,
+                    "is_within_tolerance": bool,
+                }
+            },
+            "matches_template": bool,  # all joints within acceptable range
+            "num_frames": int,
+        }
+    """
+    if not rep_angle_frames:
+        return {"overall_score": 0.0, "joint_scores": {}, "matches_template": False, "num_frames": 0}
+    
+    # Collect all angle values for each joint across the rep
+    joint_values: Dict[str, List[float]] = {}
+    for frame in rep_angle_frames:
+        for joint_name, angle in frame.items():
+            if joint_name not in joint_values:
+                joint_values[joint_name] = []
+            joint_values[joint_name].append(float(angle))
+    
+    # Score each joint
+    joint_scores = {}
+    weighted_scores = []
+    
+    for joint_name, template_info in template.joints.items():
+        if joint_name not in joint_values:
+            # Joint missing from rep data
+            joint_scores[joint_name] = {
+                "score": 0.0,
+                "rom": None,
+                "expected_rom": float(template_info.delta),
+                "is_within_range": False,
+                "is_within_tolerance": False,
+            }
+            continue
+        
+        values = joint_values[joint_name]
+        actual_min = min(values)
+        actual_max = max(values)
+        actual_rom = actual_max - actual_min
+        
+        template_min = float(template_info.min)
+        template_max = float(template_info.max)
+        template_rom = float(template_info.delta)
+        tolerance = float(template_info.tol)
+        weight = float(template_info.weight)
+        
+        # Check if range is within template bounds
+        is_within_range = (actual_min >= template_min and actual_max <= template_max)
+        
+        # Check if ROM is within tolerance of expected
+        rom_diff = abs(actual_rom - template_rom)
+        is_within_tolerance = (rom_diff <= tolerance)
+        
+        # Score: combination of range match and ROM match
+        # ROM match: how close the actual ROM is to expected (0..1)
+        if template_rom > 1e-6:
+            rom_score = max(0.0, 1.0 - (rom_diff / template_rom))
+        else:
+            rom_score = 1.0 if abs(actual_rom) < 1e-6 else 0.0
+        
+        # Range match: penalize if outside template bounds
+        if is_within_range:
+            range_score = 1.0
+        else:
+            # Penalize proportionally to how far outside
+            out_of_bounds = 0.0
+            if actual_min < template_min:
+                out_of_bounds += (template_min - actual_min)
+            if actual_max > template_max:
+                out_of_bounds += (actual_max - template_max)
+            template_span = template_max - template_min
+            if template_span > 1e-6:
+                range_score = max(0.0, 1.0 - (out_of_bounds / template_span))
+            else:
+                range_score = 0.5
+        
+        # Combined score (favor range adherence slightly)
+        joint_score = 0.6 * range_score + 0.4 * rom_score
+        joint_score = max(0.0, min(1.0, joint_score))
+        
+        joint_scores[joint_name] = {
+            "score": joint_score,
+            "rom": actual_rom,
+            "expected_rom": template_rom,
+            "is_within_range": is_within_range,
+            "is_within_tolerance": is_within_tolerance,
+        }
+        
+        weighted_scores.append((joint_score, weight))
+    
+    # Calculate weighted overall score
+    if weighted_scores:
+        total_weight = sum(w for _, w in weighted_scores)
+        if total_weight > 1e-9:
+            overall_score = sum(s * w for s, w in weighted_scores) / total_weight
+        else:
+            overall_score = sum(s for s, _ in weighted_scores) / len(weighted_scores)
+    else:
+        overall_score = 0.0
+    
+    overall_score = max(0.0, min(1.0, overall_score))
+    
+    # Rep matches template if all joints are within tolerance and range
+    all_within = all(
+        js["is_within_tolerance"] and js["is_within_range"]
+        for js in joint_scores.values()
+        if js["rom"] is not None
+    )
+    
+    return {
+        "overall_score": overall_score,
+        "joint_scores": joint_scores,
+        "matches_template": all_within,
+        "num_frames": len(rep_angle_frames),
+    }

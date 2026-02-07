@@ -1,5 +1,6 @@
 from ultralytics import YOLO
 from utils.joints import Joints, ConnectedJoints, frame_save
+from utils.templates import build_template_from_export, save_template
 from utils.exercisedb import ExerciseDBSearch
 from utils.analyzer import LiveWindowAnalyzer
 from utils.overlay import draw_pose_and_metrics
@@ -13,6 +14,8 @@ import numpy as np
 import json
 import cv2
 import os
+import tempfile
+import shutil
 
 CACHE_DIR = Path(__file__).parent.parent / "cache" / "analysis"
 OUTPUT_DIR = Path(__file__).parent.parent / "static" / "output"
@@ -21,7 +24,165 @@ OUTPUT_DIR = Path(__file__).parent.parent / "static" / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+class ScaledFrameSave:
+    """Wrapper around frame_save that scales joint coordinates from low-res to full-res space"""
+    def __init__(self, frame_obj, scale_x, scale_y):
+        self.frame_obj = frame_obj
+        self.scale_x = scale_x
+        self.scale_y = scale_y
+    
+    def has_detections(self):
+        return self.frame_obj.has_detections()
+    
+    def get_joint_xy(self, joint: Joints):
+        """Get joint coordinates scaled to full resolution"""
+        pt = self.frame_obj.get_joint_xy(joint)
+        if pt is None:
+            return None
+        return (pt[0] * self.scale_x, pt[1] * self.scale_y)
+    
+    def get_connected_joints(self, connected: ConnectedJoints):
+        return (
+            self.get_joint_xy(connected.value[1][0]),
+            self.get_joint_xy(connected.value[1][1]),
+            self.get_joint_xy(connected.value[1][2]),
+        )
+    
+    def midpoint(self, j1: Joints, j2: Joints):
+        """Calculate midpoint between two joints (scaled)"""
+        loc1 = self.get_joint_xy(j1)
+        loc2 = self.get_joint_xy(j2)
+        if loc1 is None or loc2 is None:
+            return None
+        return ((loc1[0] + loc2[0]) / 2, (loc1[1] + loc2[1]) / 2)
+    
+    def shoulder_width(self):
+        """Calculate shoulder width"""
+        return self.find_width(Joints.LEFT_SHOULDER, Joints.RIGHT_SHOULDER)
+    
+    def hip_width(self):
+        """Calculate hip width"""
+        return self.find_width(Joints.LEFT_HIP, Joints.RIGHT_HIP)
+    
+    def torso_center(self):
+        sm = self.midpoint(Joints.LEFT_SHOULDER, Joints.RIGHT_SHOULDER)
+        hm = self.midpoint(Joints.LEFT_HIP, Joints.RIGHT_HIP)
+        if sm is None or hm is None:
+            return None
+        return ((sm[0] + hm[0]) / 2.0, (sm[1] + hm[1]) / 2.0)
+    
+    def find_width(self, j1: Joints, j2: Joints):
+        """Calculate width between two joints (scaled)"""
+        loc1 = self.get_joint_xy(j1)
+        loc2 = self.get_joint_xy(j2)
+        if loc1 is None or loc2 is None:
+            return None
+        dx = loc1[0] - loc2[0]
+        dy = loc1[1] - loc2[1]
+        return (dx**2 + dy**2)**0.5
+    
+    def _dist(self, j1: Joints, j2: Joints):
+        a = self.get_joint_xy(j1)
+        b = self.get_joint_xy(j2)
+        if a is None or b is None:
+            return None
+        dx = a[0] - b[0]
+        dy = a[1] - b[1]
+        return (dx*dx + dy*dy) ** 0.5
+    
+    def scale(self):
+        """Get scale factor (use from original for analysis consistency)"""
+        return self.frame_obj.scale()
+    
+    def angles_dict(self):
+        """Get angles dict (use from original, angles don't change with scale)"""
+        return self.frame_obj.angles_dict()
+    
+    def segment_lengths_norm(self):
+        """Get normalized segment lengths (use from original, normalized values don't change)"""
+        return self.frame_obj.segment_lengths_norm()
+
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+def transcode_video(input_path, target_fps=15, target_width=640, output_path=None):
+    """Transcode video to lower framerate and resolution"""
+    try:
+        cap = cv2.VideoCapture(input_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        if fps == 0 or width == 0 or height == 0:
+            print(f"Warning: Could not read video properties, skipping transcode")
+            cap.release()
+            return
+        
+        # Calculate aspect ratio and new height
+        aspect_ratio = height / width
+        new_width = target_width
+        new_height = int(target_width * aspect_ratio)
+        
+        # Use output_path if provided, otherwise use temp file
+        if output_path is None:
+            temp_fd, output_path = tempfile.mkstemp(suffix='.mp4')
+            os.close(temp_fd)
+            is_temp = True
+        else:
+            is_temp = False
+        
+        # Setup video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, target_fps, (new_width, new_height))
+        
+        if not out.isOpened():
+            print(f"Warning: Could not open video writer, skipping transcode")
+            cap.release()
+            if is_temp and os.path.exists(output_path):
+                os.remove(output_path)
+            return
+        
+        frame_count = 0
+        frame_skip = max(1, round(fps / target_fps))
+        
+        print(f"Transcoding video: {fps}fps -> {target_fps}fps, {width}x{height} -> {new_width}x{new_height}, skipping every {frame_skip} frames")
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            # Skip frames to reduce framerate
+            if frame_count % frame_skip == 0:
+                resized = cv2.resize(frame, (new_width, new_height))
+                out.write(resized)
+            
+            frame_count += 1
+        
+        cap.release()
+        out.release()
+        
+        frames_written = frame_count // frame_skip
+        print(f"Video transcoding complete: {frames_written} frames written")
+        
+        # Replace original file with transcoded version only if output_path not explicitly provided
+        if is_temp and frames_written > 0:
+            shutil.move(output_path, input_path)
+            print(f"Original video replaced with transcoded version")
+        elif frames_written == 0:
+            print(f"Warning: No frames written")
+            if is_temp and os.path.exists(output_path):
+                os.remove(output_path)
+        
+    except Exception as e:
+        print(f"Warning: Video transcode failed: {str(e)}")
+        # Continue anyway - original video will be used
+        try:
+            cap.release()
+            if 'output_path' in locals() and os.path.exists(output_path):
+                os.remove(output_path)
+        except:
+            pass
 
 def load_model():
     model_path = Path(__file__).parent.parent / "models" / "yolo26s-pose.pt"
@@ -73,21 +234,51 @@ class Processing:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Open video to get properties
-        cap = cv2.VideoCapture(video_path)
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        # Get original video properties before transcoding
+        cap_orig = cv2.VideoCapture(video_path)
+        orig_fps = cap_orig.get(cv2.CAP_PROP_FPS)
+        orig_width = int(cap_orig.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_height = int(cap_orig.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        orig_total_frames = int(cap_orig.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap_orig.release()
+        
+        print(f"Original video resolution: {orig_width}x{orig_height}")
+        print(f"Original video FPS: {orig_fps}")
+        
+        # Create a temporary transcoded video for processing
+        import uuid
+        temp_video = f"/tmp/temp_{uuid.uuid4().hex}.mp4"
+        print(f"Transcoding to 640p @ 15fps for faster processing...")
+        transcode_video(video_path, target_fps=15, target_width=640, output_path=temp_video)
+        
+        # Open transcoded video for processing
+        cap = cv2.VideoCapture(temp_video)
+        fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Calculate scale factors from transcoded to original resolution
+        scale_x = orig_width / width
+        scale_y = orig_height / height
+        
+        print(f"Processing resolution: {width}x{height}")
+        print(f"Scale factors: X={scale_x:.2f}, Y={scale_y:.2f}")
         
         # Generate output filename (just UUID.mp4)
         input_filename = Path(video_path).stem
         output_filename = f"{input_filename}.mp4"
         output_path = output_dir / output_filename
         
-        # Setup video writer for output
+        # Setup video writer for output (original resolution, but reduced fps)
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+        out = cv2.VideoWriter(str(output_path), fourcc, fps, (orig_width, orig_height))
+        
+        # Verify video writer opened successfully
+        if not out.isOpened():
+            raise RuntimeError(f"Failed to open video writer for {output_path}")
+        
+        print(f"Output: {orig_width}x{orig_height} @ {fps} fps -> {output_path}")
         
         # Process video frame by frame
         frame_joints_array = []  # Store all frame joints
@@ -99,23 +290,65 @@ class Processing:
 
         # results = self.model(video_path, save=True)
         exercise = self.find_exercise(exercise_name)
+        
+        # Load template for scoring
+        from utils.templates import load_template
+        from utils.overlay import draw_rep_score
+        
+        template = None
+        template_path = CACHE_DIR / f"{exercise_name.replace(' ', '_').lower()}_template.json"
+        if template_path.exists():
+            try:
+                template = load_template(str(template_path))
+                print(f"Loaded template: {exercise_name}")
+            except Exception as e:
+                print(f"Warning: Could not load template: {e}")
 
-        analyzer = LiveWindowAnalyzer(fps=fps, window_seconds=1.0)
+        analyzer = LiveWindowAnalyzer(fps=fps, window_seconds=1.0, template=template)
         live_out = []
         m = None
+        last_rep_score = None  # Track last rep score for display
+        
+        # Open original video for output frames
+        cap_orig = cv2.VideoCapture(video_path)
+        
+        # Calculate frame skip for original video to match transcoded fps
+        frame_skip_orig = max(1, round(orig_fps / fps))
+        orig_frame_count = 0
+        
         while True:
-            ret, frame = cap.read()
-            print(f"Processing frame {frame_count+1}/{total_frames} / {exercise}")
+            ret, frame_lowres = cap.read()
+            
             if not ret:
                 break
             
-            # Run YOLO pose detection on frame
-            results = self.model(frame)
+            # Read from original video, skipping frames to match transcoded fps
+            frame_orig = None
+            while True:
+                ret_orig, temp_frame = cap_orig.read()
+                orig_frame_count += 1
+                
+                if not ret_orig:
+                    break
+                
+                # Keep this frame if it matches the skip pattern
+                if (orig_frame_count - 1) % frame_skip_orig == 0:
+                    frame_orig = temp_frame
+                    break
             
-            # Save frame joints
+            if frame_orig is None:
+                break
+            
+            # Run YOLO pose detection on low-res frame
+            results = self.model(frame_lowres)
+            
+            # Save frame joints (coordinates are in low-res space)
             frame_data = []
             for result in results:
-                frame_data.append(frame_save(result))
+                # Create a scaled frame_save object that returns coordinates scaled back to full res
+                frame_obj = frame_save(result)
+                # Wrap it to scale coordinates back
+                frame_data.append(ScaledFrameSave(frame_obj, scale_x, scale_y))
             
             frame_joints_array.append(frame_data)
             
@@ -143,6 +376,9 @@ class Processing:
 
             if m:
                 live_out.append(m.to_dict())
+                # Track rep score if available
+                if m.rep_score:
+                    last_rep_score = m.rep_score
 
 
 
@@ -165,13 +401,16 @@ class Processing:
             # Draw skeleton if requested
             # if 
                 # Decide what to write out
-            output_frame = frame
+            output_frame = frame_orig
 
             if draw_skeleton == 'true':
                 # Draw using our overlay (works even if YOLO has no detections)
                 metrics_dict = m.to_dict() if m else None
                 person0 = frame_data[0] if (len(frame_data) > 0 and frame_data[0].has_detections()) else None
                 output_frame = draw_pose_and_metrics(output_frame, person0, metrics_dict)
+                
+                # Draw previous rep's score on right side
+                output_frame = draw_rep_score(output_frame, last_rep_score)
 
             # Write frame to output video
             out.write(output_frame)
@@ -182,7 +421,16 @@ class Processing:
         
         # Release resources
         cap.release()
+        cap_orig.release()
         out.release()
+        
+        # Clean up temporary video file
+        try:
+            if os.path.exists(temp_video):
+                os.remove(temp_video)
+                print(f"Cleaned up temporary video file")
+        except:
+            pass
 
         with open(output_dir / f"{input_filename}_live_metrics.json", "w") as f:
             json.dump(live_out, f, indent=2)
@@ -237,16 +485,20 @@ class Processing:
 
         changes = cur0[0].find_changing_joints(cur1[0])
         print(f"Analysis complete: {changes[0]} with diff {changes[1]}")
-        
+
+        tpl = build_template_from_export(exercise_name, changes)
+        save_template(str(CACHE_DIR / f"{exercise_name.replace(' ', '_').lower()}_template.json"), tpl)
+
+        return tpl.to_dict()  # or return tpl directly
         # Save results to cache
-        try:
-            with open(cache_file, 'w') as f:
-                json.dump(changes, f, indent=2)
-            print(f"Cached results to {cache_file}")
-        except IOError as e:
-            print(f"Warning: Could not save cache: {e}")
+        # try:
+        #     with open(cache_file, 'w') as f:
+        #         json.dump(changes, f, indent=2)
+        #     print(f"Cached results to {cache_file}")
+        # except IOError as e:
+        #     print(f"Warning: Could not save cache: {e}")
         
-        return changes
+        # return changes
 
     def get_results(self, imagePath):
         # Download image to memory (BytesIO) instead of disk

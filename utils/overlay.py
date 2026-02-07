@@ -77,3 +77,80 @@ def draw_pose_and_metrics(frame_bgr, frame_obj, metrics):
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 3, cv2.LINE_AA)
 
     return out
+
+
+def draw_rep_score(frame_bgr, rep_score):
+    """
+    Draw the previous rep's score on the right side of the frame.
+    
+    rep_score: dict from score_rep_against_template() or None
+    """
+    if not rep_score:
+        return frame_bgr
+    
+    out = frame_bgr
+    height, width = out.shape[:2]
+    
+    # Right side panel: start at 80% of width
+    panel_x = int(width * 0.75)
+    panel_y = 20
+    line_height = 28
+    
+    # Draw semi-transparent background for readability
+    overlay = out.copy()
+    cv2.rectangle(overlay, (panel_x - 10, 0), (width, height), (0, 0, 0), -1)
+    out = cv2.addWeighted(overlay, 0.3, out, 0.7, 0)
+    
+    # Title
+    cv2.putText(out, "REP SCORE", (panel_x, panel_y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2, cv2.LINE_AA)
+    
+    y = panel_y + line_height
+    
+    # Overall score with color coding
+    overall = rep_score.get("overall_score", 0.0)
+    if overall >= 0.85:
+        color = (0, 255, 0)  # Green
+        grade = "A"
+    elif overall >= 0.70:
+        color = (0, 255, 255)  # Yellow
+        grade = "B"
+    elif overall >= 0.50:
+        color = (0, 165, 255)  # Orange
+        grade = "C"
+    else:
+        color = (0, 0, 255)  # Red
+        grade = "D"
+    
+    cv2.putText(out, f"{overall:.0%} ({grade})", (panel_x, y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3, cv2.LINE_AA)
+    y += line_height + 10
+    
+    # Template match status
+    matches = rep_score.get("matches_template", False)
+    match_text = "✓ Template Match" if matches else "✗ Needs Work"
+    match_color = (0, 255, 0) if matches else (0, 0, 255)
+    cv2.putText(out, match_text, (panel_x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, match_color, 2, cv2.LINE_AA)
+    y += line_height
+    
+    # Joint scores
+    cv2.putText(out, "---", (panel_x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1, cv2.LINE_AA)
+    y += line_height - 5
+    
+    joint_scores = rep_score.get("joint_scores", {})
+    for joint_name, scores in sorted(joint_scores.items()):
+        score = scores.get("score", 0.0)
+        is_ok = scores.get("is_within_range", False) and scores.get("is_within_tolerance", False)
+        
+        # Color based on pass/fail
+        color = (0, 255, 0) if is_ok else (0, 0, 255)
+        
+        # Abbreviate joint names
+        short_name = joint_name.replace("LEFT_", "L_").replace("RIGHT_", "R_")
+        text = f"{short_name}: {score:.0%}"
+        
+        cv2.putText(out, text, (panel_x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 1, cv2.LINE_AA)
+        y += line_height - 5
+        
+        if y > height - 20:
+            break
+    
+    return out

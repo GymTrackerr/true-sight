@@ -150,9 +150,6 @@ def upload():
                 video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 file.save(video_path)
                 
-                # Transcode video to lower framerate (15fps) and resolution (640p)
-                transcode_video(video_path, target_fps=15, target_width=640)
-                
                 # Start processing in background thread
                 process_thread = threading.Thread(
                     target=proc.process_video,
