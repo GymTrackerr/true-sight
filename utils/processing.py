@@ -1,9 +1,9 @@
 from ultralytics import YOLO
 from utils.joints import Joints, ConnectedJoints, frame_save
-from utils.templates import build_template_from_export, save_template
+from utils.templates import build_template_from_export, save_template, load_template
 from utils.exercisedb import ExerciseDBSearch
 from utils.analyzer import LiveWindowAnalyzer
-from utils.overlay import draw_pose_and_metrics
+from utils.overlay import draw_rep_score, draw_pose_and_metrics
 
 import torch
 from pathlib import Path
@@ -202,11 +202,7 @@ class Processing:
         print(f"Total frames: {orig_total_frames}")
 
         # results = self.model(video_path, save=True)
-        exercise = self.find_exercise(exercise_name)
-        
-        # Load template for scoring
-        from utils.templates import load_template
-        from utils.overlay import draw_rep_score
+        # exercise = self.find_exercise(exercise_name)
         
         template = None
         template_path = CACHE_DIR / f"{exercise_name.replace(' ', '_').lower()}_template.json"

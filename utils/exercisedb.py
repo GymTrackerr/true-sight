@@ -3,8 +3,10 @@ import json
 import os
 from pathlib import Path
 
-# api_base_url = "http://192.168.3.21:5002"
-api_base_url = "http://127.0.0.1:5002"
+# api_base_url = "http://192.168.3.24:5002"
+# api_base_url = "http://127.0.0.1:5002"
+api_base_url = "https://api.trackerr.ca"
+
 CACHE_FILE = Path(__file__).parent.parent / "cache" / "exercise_cache.json"
 
 class ExerciseDBSearch:
