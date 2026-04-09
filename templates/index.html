@@ -204,7 +204,7 @@
         // Load exercises from ExerciseDB API
         async function loadExercises() {
             try {
-                const response = await fetch(`${API_BASE}/v1/exercises`);
+                const response = await fetch(`${API_BASE}/v1/exercisedb`);
                 if (!response.ok) throw new Error("Failed to fetch exercises");
                 
                 const exercises = await response.json();

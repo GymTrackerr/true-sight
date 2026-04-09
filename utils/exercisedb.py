@@ -35,7 +35,7 @@ class ExerciseDBSearch:
         """Fetch exercises from API and save to cache file"""
         print("Loading Cache from ExerciseDB API...")
         try:
-            response = requests.get(f"{api_base_url}/v1/exercises", timeout=10)
+            response = requests.get(f"{api_base_url}/v1/exercisedb", timeout=10)
             response.raise_for_status()
             self.cache = response.json()
             self._save_cache()
