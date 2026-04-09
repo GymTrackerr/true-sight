@@ -1,6 +1,8 @@
 # TrueSight
 Created by Daniel Kravec on January 27, 2026
 
+### Docker Run
+docker build -t novapro/truesight . && docker tag novapro/truesight registry.xnet.com:5000/novapro/truesight:latest && docker push registry.xnet.com:5000/novapro/truesight
 
 ## Real-time feedback
 - have real time feedback on form during exercise talking
