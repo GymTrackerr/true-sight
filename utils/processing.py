@@ -14,12 +14,21 @@ import numpy as np
 import json
 import cv2
 import os
+import re
 
 CACHE_DIR = Path(__file__).parent.parent / "cache" / "analysis"
 OUTPUT_DIR = Path(__file__).parent.parent / "static" / "output"
 
 # Create output directory if it doesn't exist
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _safe_exercise_key(exercise_name: str) -> str:
+    normalized = exercise_name.strip().lower()
+    # Keep cache/template filenames safe for all ExerciseDB names (e.g. "3/4 Sit-Up")
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized or "exercise"
 
 
 class ScaledFrameSave:
@@ -211,7 +220,8 @@ class Processing:
         # exercise = self.find_exercise(exercise_name)
         
         template = None
-        template_path = CACHE_DIR / f"{exercise_name.replace(' ', '_').lower()}_template.json"
+        exercise_key = _safe_exercise_key(exercise_name)
+        template_path = CACHE_DIR / f"{exercise_key}_template.json"
         if template_path.exists():
             try:
                 template = load_template(str(template_path))
@@ -352,7 +362,8 @@ class Processing:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         
         # Create cache file path using exercise name
-        cache_file = CACHE_DIR / f"{exercise_name.replace(' ', '_').lower()}.json"
+        exercise_key = _safe_exercise_key(exercise_name)
+        cache_file = CACHE_DIR / f"{exercise_key}.json"
         
         # Check if results are cached
         if cache_file.exists():
@@ -380,7 +391,7 @@ class Processing:
         print(f"Analysis complete: {changes[0]} with diff {changes[1]}")
 
         tpl = build_template_from_export(exercise_name, changes)
-        save_template(str(CACHE_DIR / f"{exercise_name.replace(' ', '_').lower()}_template.json"), tpl)
+        save_template(str(CACHE_DIR / f"{exercise_key}_template.json"), tpl)
 
         return tpl.to_dict()  # or return tpl directly
         # Save results to cache
