@@ -8,7 +8,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    YOLO_CONFIG_DIR=/tmp/Ultralytics
 
 WORKDIR /app
 
@@ -26,6 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy project
 COPY . /app
+
+RUN mkdir -p /app/cache /app/cache/analysis /app/models /app/static/output /tmp/Ultralytics
 
 # Upgrade packaging tooling
 RUN python -m pip install --upgrade pip setuptools wheel

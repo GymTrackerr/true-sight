@@ -46,6 +46,7 @@ class ExerciseDBSearch:
     def _save_cache(self):
         """Save cache to file"""
         try:
+            CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(CACHE_FILE, 'w') as f:
                 json.dump(self.cache, f, indent=2)
             print(f"Cache saved to {CACHE_FILE}")

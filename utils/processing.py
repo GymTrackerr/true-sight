@@ -104,17 +104,23 @@ class ScaledFrameSave:
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def load_model():
-    model_path = Path(__file__).parent.parent / "models" / "yolo26s-pose.pt"
+    model_dir = Path(__file__).parent.parent / "models"
+    model_path = model_dir / "yolo11m-pose.pt"
+    fallback_download_path = Path.cwd() / "yolo11m-pose.pt"
     
     # Create models directory if it doesn't exist
-    model_path.parent.mkdir(parents=True, exist_ok=True)
+    model_dir.mkdir(parents=True, exist_ok=True)
     
-    # If model doesn't exist, YOLO will auto-download it
     if not model_path.exists():
         print(f"Model not found at {model_path}, downloading...")
-        model = YOLO("yolo11m-pose")  # YOLO auto-downloads from hub
-        # Save to models directory
-        model.export(format='pt', save_dir=str(model_path.parent))
+        model = YOLO("yolo11m-pose.pt")
+
+        # Ultralytics downloads into the current working directory when needed.
+        # Move the downloaded weights into the expected models directory so
+        # future boots are deterministic and don't re-download.
+        if fallback_download_path.exists() and fallback_download_path != model_path:
+            fallback_download_path.replace(model_path)
+            model = YOLO(str(model_path))
     else:
         print(f"Loading model from {model_path}")
         model = YOLO(str(model_path))

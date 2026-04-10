@@ -2,7 +2,7 @@ from ultralytics import YOLO
 from utils.joints import Joints, frame_save
 from utils.exercisedb import ExerciseDBSearch
 # https://docs.ultralytics.com/tasks/pose/
-api_base_url = "http://192.168.3.21:5002"
+api_base_url = "https://api.trackerr.ca"
 
 # load model
 model = YOLO("yolo26s-pose.pt")
